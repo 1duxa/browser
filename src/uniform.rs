@@ -14,7 +14,6 @@ pub struct ShaderSquare {
 
     pub _pad: u32,
 }
-
-pub enum Component {
-    Square(ShaderSquare),
+impl ShaderSquare {
+    pub const VERTECIES: u32 = 2;
 }

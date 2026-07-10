@@ -1,0 +1,11 @@
+
+so we would do something like 
+
+
+ fn main(builder_handle) {
+  builder_handle.add(
+    Text::new("hello world", 14, 4 , 6).with_styles(Color::rbg(255, 0, 123))
+  ).add(
+    Square::new().with_styles(Color::Gray, )
+  )
+}

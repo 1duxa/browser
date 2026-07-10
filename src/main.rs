@@ -1,5 +1,4 @@
 use std::sync::Arc;
-
 use wgpu::{BindGroup, Buffer, RenderPipeline};
 use wgpu_text::{
     BrushBuilder, TextBrush,
@@ -12,10 +11,18 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use crate::uniform::{Component, ShaderSquare};
+use crate::{
+    cli::{Cli, RunMode},
+    component::Component,
+    uniform::ShaderSquare,
+};
+
+mod cli;
+mod component;
+mod scripting;
 mod uniform;
 
-struct State {
+struct State<'a> {
     instance: wgpu::Instance,
     window: Arc<Window>,
     device: wgpu::Device,
@@ -26,12 +33,14 @@ struct State {
     pipeline: RenderPipeline,
     bind_group: BindGroup,
     buffer: Buffer,
-    components: Vec<Component>,
+    components: Vec<Component<'a>>,
     brush: TextBrush,
+    cursor_pos: winit::dpi::PhysicalPosition<f64>,
+    hovered: Option<usize>,
 }
 
-impl State {
-    async fn new(display: OwnedDisplayHandle, window: Arc<Window>) -> State {
+impl<'a> State<'a> {
+    async fn new(display: OwnedDisplayHandle, window: Arc<Window>, cli: Arc<Cli>) -> State<'a> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
             Box::new(display),
         ));
@@ -52,7 +61,7 @@ impl State {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("square.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../square.wgsl").into()),
         });
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -116,7 +125,7 @@ impl State {
             multiview_mask: None,
         });
 
-        let font = FontArc::try_from_vec(include_bytes!("DejaVuSans.ttf").to_vec()).unwrap();
+        let font = FontArc::try_from_vec(include_bytes!("../DejaVuSans.ttf").to_vec()).unwrap();
         let brush = BrushBuilder::using_font(font).build(
             &device,
             size.width.max(1),
@@ -134,7 +143,21 @@ impl State {
             surface_format,
             pipeline,
             bind_group,
-            components: vec![
+            components: State::test_get_components(&cli),
+            buffer: uniform_buffer,
+            brush,
+            cursor_pos: (0.0, 0.0).into(),
+            hovered: None,
+        };
+
+        state.configure_surface();
+
+        state
+    }
+
+    fn test_get_components(cli: &Cli) -> Vec<Component<'static>> {
+        match cli.mode {
+            RunMode::SquareTest => vec![
                 Component::Square(ShaderSquare {
                     scale: 1.0,
                     width: 0.5,
@@ -177,14 +200,14 @@ impl State {
                     a: 1.0,
                     ..Default::default()
                 }),
+                Component::Text(
+                    Section::default()
+                        .add_text(Text::new("HELLO WORLD!!!!").with_scale(21.0))
+                        .with_screen_position((4.0, 10.0)),
+                ),
             ],
-            buffer: uniform_buffer,
-            brush,
-        };
-
-        state.configure_surface();
-
-        state
+            RunMode::Default => Vec::new(),
+        }
     }
 
     fn get_window(&self) -> &Window {
@@ -208,13 +231,11 @@ impl State {
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         self.size = new_size;
         self.configure_surface();
-        // text maps pixel coords -> clip space using the viewport size,
-        // so it must be told when the window changes.
         self.brush
             .resize_view(new_size.width as f32, new_size.height as f32, &self.queue);
     }
 
-    fn render(&mut self) {
+    fn render(&mut self, _: &Cli) {
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => texture,
             wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => return,
@@ -239,27 +260,20 @@ impl State {
             });
 
         let mut square_vec: Vec<&ShaderSquare> = Vec::new();
+        let mut sections: Vec<&Section> = Vec::new();
         for c in &self.components {
             match c {
                 Component::Square(sq) => square_vec.push(sq),
-                // future: Component::Text(..) => sections.push(...)
+                Component::Text(txt) => sections.push(txt),
             }
         }
 
-        // upload square instance data
         let mut data = encase::StorageBuffer::new(Vec::new());
         data.write(&square_vec).unwrap();
         self.queue.write_buffer(&self.buffer, 0, data.as_ref());
 
-        let section = Section::default()
-            .add_text(
-                Text::new("hello browser !!! ")
-                    .with_scale(40.0)
-                    .with_color([0.0, 0.0, 0.0, 1.0]),
-            )
-            .with_screen_position((20.0, 20.0));
         self.brush
-            .queue(&self.device, &self.queue, [&section])
+            .queue(&self.device, &self.queue, sections)
             .unwrap();
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -282,7 +296,10 @@ impl State {
 
         renderpass.set_pipeline(&self.pipeline);
         renderpass.set_bind_group(0, &self.bind_group, &[]);
-        renderpass.draw(0..6, 0..(square_vec.len() as u32));
+
+        let squares = square_vec.len() as u32;
+
+        renderpass.draw(0..(squares * ShaderSquare::VERTECIES), 0..squares);
 
         self.brush.draw(&mut renderpass);
 
@@ -292,14 +309,21 @@ impl State {
         self.window.pre_present_notify();
         surface_texture.present();
     }
+
+    fn cursor_to_ndc(&self) -> (f32, f32) {
+        let x = (self.cursor_pos.x as f32 / self.size.width as f32) * 2.0 - 1.0;
+        let y = 1.0 - (self.cursor_pos.y as f32 / self.size.height as f32) * 2.0; // flip y
+        (x, y)
+    }
 }
 
 #[derive(Default)]
-struct App {
-    state: Option<State>,
+struct App<'a> {
+    state: Option<State<'a>>,
+    cli: Arc<Cli>,
 }
 
-impl ApplicationHandler for App {
+impl<'a> ApplicationHandler for App<'a> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window = Arc::new(
             event_loop
@@ -310,6 +334,7 @@ impl ApplicationHandler for App {
         let state = pollster::block_on(State::new(
             event_loop.owned_display_handle(),
             window.clone(),
+            self.cli.clone(),
         ));
         self.state = Some(state);
 
@@ -323,11 +348,49 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                state.render();
+                state.render(&self.cli);
                 state.get_window().request_redraw();
+            }
+            WindowEvent::MouseInput {
+                state: element_state,
+                button,
+                ..
+            } if element_state == winit::event::ElementState::Pressed
+                && button == winit::event::MouseButton::Left =>
+            {
+                let (nx, ny) = state.cursor_to_ndc();
+                for c in state.components.iter().rev() {
+                    if let Component::Square(sq) = c {
+                        let hw = sq.width * sq.scale / 2.0;
+                        let hh = sq.height * sq.scale / 2.0;
+                        if (nx - sq.x).abs() <= hw && (ny - sq.y).abs() <= hh {
+                            _ = scripting::test::build();
+                            break;
+                        }
+                    }
+                }
             }
             WindowEvent::Resized(size) => {
                 state.resize(size);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                state.cursor_pos = position;
+                let (nx, ny) = state.cursor_to_ndc();
+                state.hovered = state
+                    .components
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(i, c)| {
+                        if let Component::Square(sq) = c {
+                            let hw = sq.width * sq.scale / 2.0;
+                            let hh = sq.height * sq.scale / 2.0;
+                            if (nx - sq.x).abs() <= hw && (ny - sq.y).abs() <= hh {
+                                return Some(i);
+                            }
+                        }
+                        None
+                    });
             }
             _ => (),
         }
@@ -339,6 +402,11 @@ fn main() {
 
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::default();
+
+    let mut app = App::<'_> {
+        cli: Arc::new(<Cli as clap::Parser>::parse()),
+        ..Default::default()
+    };
+
     event_loop.run_app(&mut app).unwrap();
 }
