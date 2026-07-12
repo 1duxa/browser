@@ -2,19 +2,26 @@ use wgpu::{CommandEncoder, SurfaceTexture, TextureView};
 
 use crate::{
     State,
-    gpu::{solids::SolidsPipeline, text::TextPipeline},
+    gpu::{sdf::SdfPipeline, solids::SolidsPipeline, text::TextPipeline},
 };
 
 pub struct GpuResources {
     pub common: Common,
     pub solids_pipe: SolidsPipeline,
+    pub sdf_pipe: SdfPipeline,
     pub text_pipe: TextPipeline,
 }
 impl GpuResources {
-    pub fn new(common: Common, solids_pipe: SolidsPipeline, text_pipe: TextPipeline) -> Self {
+    pub fn new(
+        common: Common,
+        solids_pipe: SolidsPipeline,
+        sdf_pipe: SdfPipeline,
+        text_pipe: TextPipeline,
+    ) -> Self {
         Self {
             common,
             solids_pipe,
+            sdf_pipe,
             text_pipe,
         }
     }

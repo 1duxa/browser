@@ -33,7 +33,7 @@ impl<T: encase::ShaderType> VecBuf<T> {
     pub fn buf(&self) -> &Buffer {
         &self.buffer
     }
-
+    #[allow(unused)]
     pub fn capacity(&self) -> u64 {
         self.capacity
     }

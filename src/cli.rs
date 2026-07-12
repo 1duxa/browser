@@ -12,4 +12,3 @@ pub enum RunMode {
     Default,
     SquareTest,
 }
-

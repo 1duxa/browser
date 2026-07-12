@@ -12,6 +12,7 @@ use crate::{
     component::Component,
     gpu::{
         gpu_resources::{self, GpuResources},
+        sdf::SdfPipeline,
         solids::SolidsPipeline,
         text::TextPipeline,
     },
@@ -22,6 +23,7 @@ mod cli;
 mod component;
 mod gpu;
 mod scripting;
+mod tree;
 mod uniform;
 
 struct State<'a> {
@@ -61,9 +63,11 @@ impl<'a> State<'a> {
         let solids_pipe =
             SolidsPipeline::default_pipeline(&gpu_common.surface_format, &gpu_common.device);
 
+        let sdf_pipe =
+            SdfPipeline::default_pipeline(&gpu_common.surface_format, &gpu_common.device);
         let text_pipe = TextPipeline::default_pipeline(&gpu_common.device, surface_format, size);
 
-        let gpu_resources = GpuResources::new(gpu_common, solids_pipe, text_pipe);
+        let gpu_resources = GpuResources::new(gpu_common, solids_pipe, sdf_pipe, text_pipe);
         let state = State {
             instance,
             window,
