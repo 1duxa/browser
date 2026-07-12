@@ -10,7 +10,11 @@ use winit::{
 use crate::{
     cli::{Cli, RunMode},
     component::Component,
-    gpu::gpu_resources::{self, GpuResources, SolidsPipeline, TextPipeline},
+    gpu::{
+        gpu_resources::{self, GpuResources},
+        solids::SolidsPipeline,
+        text::TextPipeline,
+    },
     uniform::ShaderSquare,
 };
 
@@ -162,30 +166,10 @@ impl<'a> State<'a> {
     }
 
     fn render(&mut self, _: &Cli) {
-        let surface_texture = match self.gpu_resources.common.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture) => texture,
-            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => return,
-            wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Outdated => {
-                self.configure_surface();
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                unreachable!("No error scope registered, so validation errors will panic")
-            }
-            wgpu::CurrentSurfaceTexture::Lost => {
-                self.gpu_resources.common.surface =
-                    self.instance.create_surface(self.window.clone()).unwrap();
-                self.configure_surface();
-                return;
-            }
+        let (surface_texture, texture_view) = match gpu_resources::Common::get_texture(self) {
+            Some(tx) => tx,
+            _ => return,
         };
-        let texture_view = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor {
-                format: Some(self.gpu_resources.common.surface_format.add_srgb_suffix()),
-                ..Default::default()
-            });
-
         let mut square_vec: Vec<&ShaderSquare> = Vec::new();
         let mut sections: Vec<&Section> = Vec::new();
         for c in &self.components {
@@ -195,12 +179,10 @@ impl<'a> State<'a> {
             }
         }
 
-        let mut data = encase::StorageBuffer::new(Vec::new());
-        data.write(&square_vec).unwrap();
-        self.gpu_resources.common.queue.write_buffer(
-            &self.gpu_resources.solids_pipe.buffer,
-            0,
-            data.as_ref(),
+        self.gpu_resources.solids_pipe.update(
+            &self.gpu_resources.common.device,
+            &self.gpu_resources.common.queue,
+            &square_vec,
         );
 
         self.gpu_resources
@@ -213,11 +195,7 @@ impl<'a> State<'a> {
             )
             .unwrap();
 
-        let mut encoder = self
-            .gpu_resources
-            .common
-            .device
-            .create_command_encoder(&Default::default());
+        let mut encoder = self.gpu_resources.common.get_encoder();
         let mut renderpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
