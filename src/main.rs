@@ -1,9 +1,5 @@
 use std::sync::Arc;
-use wgpu::{BindGroup, Buffer, RenderPipeline};
-use wgpu_text::{
-    BrushBuilder, TextBrush,
-    glyph_brush::{Section, Text, ab_glyph::FontArc},
-};
+use wgpu_text::glyph_brush::{Section, Text};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -14,28 +10,26 @@ use winit::{
 use crate::{
     cli::{Cli, RunMode},
     component::Component,
+    gpu::gpu_resources::{self, GpuResources, SolidsPipeline, TextPipeline},
     uniform::ShaderSquare,
 };
 
 mod cli;
 mod component;
+mod gpu;
 mod scripting;
 mod uniform;
 
 struct State<'a> {
     instance: wgpu::Instance,
     window: Arc<Window>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    size: winit::dpi::PhysicalSize<u32>,
-    surface: wgpu::Surface<'static>,
-    surface_format: wgpu::TextureFormat,
-    pipeline: RenderPipeline,
-    bind_group: BindGroup,
-    buffer: Buffer,
-    components: Vec<Component<'a>>,
-    brush: TextBrush,
     cursor_pos: winit::dpi::PhysicalPosition<f64>,
+    size: winit::dpi::PhysicalSize<u32>,
+
+    components: Vec<Component<'a>>,
+
+    gpu_resources: GpuResources,
+
     hovered: Option<usize>,
 }
 
@@ -54,98 +48,24 @@ impl<'a> State<'a> {
             .unwrap();
 
         let size = window.inner_size();
-
         let surface = instance.create_surface(window.clone()).unwrap();
         let cap = surface.get_capabilities(&adapter);
         let surface_format = cap.formats[0];
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../square.wgsl").into()),
-        });
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: 3 * <ShaderSquare as encase::ShaderType>::min_size().get(),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let gpu_common = gpu_resources::Common::new(device, queue, surface, surface_format);
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: None,
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        let solids_pipe =
+            SolidsPipeline::default_pipeline(&gpu_common.surface_format, &gpu_common.device);
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
+        let text_pipe = TextPipeline::default_pipeline(&gpu_common.device, surface_format, size);
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format.add_srgb_suffix(),
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            cache: None,
-            multiview_mask: None,
-        });
-
-        let font = FontArc::try_from_vec(include_bytes!("../DejaVuSans.ttf").to_vec()).unwrap();
-        let brush = BrushBuilder::using_font(font).build(
-            &device,
-            size.width.max(1),
-            size.height.max(1),
-            surface_format,
-        );
-
+        let gpu_resources = GpuResources::new(gpu_common, solids_pipe, text_pipe);
         let state = State {
             instance,
             window,
-            device,
-            queue,
             size,
-            surface,
-            surface_format,
-            pipeline,
-            bind_group,
+            gpu_resources,
             components: State::test_get_components(&cli),
-            buffer: uniform_buffer,
-            brush,
             cursor_pos: (0.0, 0.0).into(),
             hovered: None,
         };
@@ -217,26 +137,32 @@ impl<'a> State<'a> {
     fn configure_surface(&self) {
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: self.surface_format,
-            view_formats: vec![self.surface_format.add_srgb_suffix()],
+            format: self.gpu_resources.common.surface_format,
+            view_formats: vec![self.gpu_resources.common.surface_format.add_srgb_suffix()],
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             width: self.size.width,
             height: self.size.height,
             desired_maximum_frame_latency: 2,
             present_mode: wgpu::PresentMode::AutoVsync,
         };
-        self.surface.configure(&self.device, &surface_config);
+        self.gpu_resources
+            .common
+            .surface
+            .configure(&self.gpu_resources.common.device, &surface_config);
     }
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         self.size = new_size;
         self.configure_surface();
-        self.brush
-            .resize_view(new_size.width as f32, new_size.height as f32, &self.queue);
+        self.gpu_resources.text_pipe.brush.resize_view(
+            new_size.width as f32,
+            new_size.height as f32,
+            &self.gpu_resources.common.queue,
+        );
     }
 
     fn render(&mut self, _: &Cli) {
-        let surface_texture = match self.surface.get_current_texture() {
+        let surface_texture = match self.gpu_resources.common.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => texture,
             wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => return,
             wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Outdated => {
@@ -247,7 +173,8 @@ impl<'a> State<'a> {
                 unreachable!("No error scope registered, so validation errors will panic")
             }
             wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface = self.instance.create_surface(self.window.clone()).unwrap();
+                self.gpu_resources.common.surface =
+                    self.instance.create_surface(self.window.clone()).unwrap();
                 self.configure_surface();
                 return;
             }
@@ -255,7 +182,7 @@ impl<'a> State<'a> {
         let texture_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor {
-                format: Some(self.surface_format.add_srgb_suffix()),
+                format: Some(self.gpu_resources.common.surface_format.add_srgb_suffix()),
                 ..Default::default()
             });
 
@@ -270,13 +197,27 @@ impl<'a> State<'a> {
 
         let mut data = encase::StorageBuffer::new(Vec::new());
         data.write(&square_vec).unwrap();
-        self.queue.write_buffer(&self.buffer, 0, data.as_ref());
+        self.gpu_resources.common.queue.write_buffer(
+            &self.gpu_resources.solids_pipe.buffer,
+            0,
+            data.as_ref(),
+        );
 
-        self.brush
-            .queue(&self.device, &self.queue, sections)
+        self.gpu_resources
+            .text_pipe
+            .brush
+            .queue(
+                &self.gpu_resources.common.device,
+                &self.gpu_resources.common.queue,
+                sections,
+            )
             .unwrap();
 
-        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut encoder = self
+            .gpu_resources
+            .common
+            .device
+            .create_command_encoder(&Default::default());
         let mut renderpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -294,18 +235,18 @@ impl<'a> State<'a> {
             multiview_mask: None,
         });
 
-        renderpass.set_pipeline(&self.pipeline);
-        renderpass.set_bind_group(0, &self.bind_group, &[]);
+        renderpass.set_pipeline(&self.gpu_resources.solids_pipe.pipeline);
+        renderpass.set_bind_group(0, &self.gpu_resources.solids_pipe.bind_group, &[]);
 
         let squares = square_vec.len() as u32;
 
         renderpass.draw(0..(squares * ShaderSquare::VERTECIES), 0..squares);
 
-        self.brush.draw(&mut renderpass);
+        self.gpu_resources.text_pipe.brush.draw(&mut renderpass);
 
         drop(renderpass);
 
-        self.queue.submit([encoder.finish()]);
+        self.gpu_resources.common.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         surface_texture.present();
     }
